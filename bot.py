@@ -116,7 +116,8 @@ async def get_players(host, port):
         if status.players.sample:
             return {p.name for p in status.players.sample}, status.players.online
         return set(), status.players.online
-    except Exception:
+    except Exception as e:
+        log.warning("Impossible de joindre %s:%s -> %s", host, port, e)
         return set(), 0
 
 def format_duree(secondes):
@@ -326,11 +327,11 @@ class PanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Tracker un joueur", style=discord.ButtonStyle.primary, emoji="🎯")
+    @discord.ui.button(label="Tracker un joueur", style=discord.ButtonStyle.primary, emoji="🎯", custom_id="panel:tracker")
     async def tracker(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TrackerModal())
 
-    @discord.ui.button(label="Supprimer un tracker", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="Supprimer un tracker", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="panel:untrack")
     async def untrack(self, interaction: discord.Interaction, button: discord.ui.Button):
         actifs = [(k, e[1]) for k, v in trackers.items() for e in v if e[0] == interaction.user.id]
         if not actifs:
@@ -338,7 +339,7 @@ class PanelView(discord.ui.View):
             return
         await interaction.response.send_message("Choisis le tracker à supprimer :", view=UntrackView(interaction.user.id, actifs), ephemeral=True)
 
-    @discord.ui.button(label="Voir les joueurs", style=discord.ButtonStyle.secondary, emoji="👥")
+    @discord.ui.button(label="Voir les joueurs", style=discord.ButtonStyle.secondary, emoji="👥", custom_id="panel:joueurs")
     async def joueurs(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         msg = ""
@@ -360,23 +361,23 @@ class PanelView(discord.ui.View):
                 msg += f"**{nom}** — {count} joueur(s) :\n" + "\n".join(lines) + "\n\n"
         await interaction.followup.send(msg.strip(), ephemeral=True)
 
-    @discord.ui.button(label="Activer rapport horaire", style=discord.ButtonStyle.secondary, emoji="📋")
+    @discord.ui.button(label="Activer rapport horaire", style=discord.ButtonStyle.secondary, emoji="📋", custom_id="panel:rapport")
     async def rapport(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Choisir le serveur :", view=ServeurSelectView("rapport"), ephemeral=True)
 
-    @discord.ui.button(label="Désactiver rapport", style=discord.ButtonStyle.secondary, emoji="🔕")
+    @discord.ui.button(label="Désactiver rapport", style=discord.ButtonStyle.secondary, emoji="🔕", custom_id="panel:stoprapport")
     async def stoprapport(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Choisir le serveur :", view=ServeurSelectView("stoprapport"), ephemeral=True)
 
-    @discord.ui.button(label="Envoyer les stats", style=discord.ButtonStyle.secondary, emoji="📊")
+    @discord.ui.button(label="Envoyer les stats", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="panel:stats")
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Choisir le serveur :", view=ServeurSelectView("stats"), ephemeral=True)
 
-    @discord.ui.button(label="Envoyer les graphiques", style=discord.ButtonStyle.secondary, emoji="📈")
+    @discord.ui.button(label="Envoyer les graphiques", style=discord.ButtonStyle.secondary, emoji="📈", custom_id="panel:graphiques")
     async def graphique(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Choisir le serveur :", view=ServeurSelectView("graphique"), ephemeral=True)
 
-    @discord.ui.button(label="Mes trackers actifs", style=discord.ButtonStyle.secondary, emoji="📌")
+    @discord.ui.button(label="Mes trackers actifs", style=discord.ButtonStyle.secondary, emoji="📌", custom_id="panel:mestrackers")
     async def mes_trackers(self, interaction: discord.Interaction, button: discord.ui.Button):
         actifs = [(k, e[1]) for k, v in trackers.items() for e in v if e[0] == interaction.user.id]
         if actifs:
@@ -466,9 +467,13 @@ async def on_ready():
         return
     bot_started = True
     charger()
-    client.add_view(PanelView())  # rend les boutons du panel cliquables même après un redémarrage
+    try:
+        client.add_view(PanelView())  # rend les boutons du panel cliquables même après un redémarrage
+    except Exception:
+        log.exception("Impossible d'enregistrer la vue persistante du panel (non bloquant)")
     for nom in SERVEURS:
         client.loop.create_task(monitor_serveur(nom))
+    log.info("Surveillance lancée pour : %s", ", ".join(SERVEURS))
 
 @client.event
 async def on_error(event, *args, **kwargs):
