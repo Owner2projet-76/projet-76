@@ -111,13 +111,19 @@ def charger():
 
 async def get_players(host, port):
     try:
-        server = JavaServer(host, port)
+        # .lookup() reproduit le comportement du client Minecraft : si l'adresse
+        # ne contient pas de port explicite, il vérifie d'abord un enregistrement
+        # DNS SRV avant de se rabattre sur default_port. Beaucoup d'hébergeurs
+        # avec sous-domaine (comme ici) redirigent uniquement via un SRV, sans
+        # enregistrement A direct sur le sous-domaine -> JavaServer(host, port)
+        # échouait avec "No address associated with hostname".
+        server = await asyncio.to_thread(JavaServer.lookup, host)
         status = await asyncio.to_thread(server.status)
         if status.players.sample:
             return {p.name for p in status.players.sample}, status.players.online
         return set(), status.players.online
     except Exception as e:
-        log.warning("Impossible de joindre %s:%s -> %s", host, port, e)
+        log.warning("Impossible de joindre %s -> %s", host, e)
         return set(), 0
 
 def format_duree(secondes):
