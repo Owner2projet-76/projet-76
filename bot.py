@@ -8,6 +8,7 @@ import logging
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from aiohttp import web
 from mcstatus import JavaServer
 from collections import defaultdict
 
@@ -29,7 +30,7 @@ os.makedirs(os.path.dirname(SAVE_FILE), exist_ok=True)
 
 SERVEURS = {
     "blaise-pascal": {
-        "host": "blaise-pascal.nitro.games",
+        "host": "blaise-pascal.mine.fun",
         "port": 25565,
         "channels": {
             "alertes": 1499796586014707885,
@@ -48,6 +49,161 @@ CHANNEL_COMMANDES = 1499796590112538874
 
 intents = discord.Intents.default()
 intents.message_content = True
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Player Tracker</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262a33;
+    --text: #e6e8eb; --muted: #8b93a1; --accent: #5865F2; --online: #3ba55d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 32px 20px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 24px; margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 16px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .server-title { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
+  .server-host { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .online-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(59,165,93,0.15); color: var(--online);
+    padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--online); }
+  .players { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .chip { background: #21252e; border: 1px solid var(--border); padding: 6px 14px; border-radius: 8px; font-size: 14px; }
+  .empty { color: var(--muted); font-style: italic; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 8px 10px; font-size: 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .bar-label { width: 120px; font-size: 13px; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #21252e; border-radius: 6px; height: 18px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; }
+  .bar-value { width: 70px; text-align: right; font-size: 12px; color: var(--muted); flex-shrink: 0; }
+  .updated { color: var(--muted); font-size: 12px; text-align: center; margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎮 Player Tracker</h1>
+  <div class="sub">Surveillance en temps réel</div>
+  <div id="content"></div>
+  <div class="updated" id="updated"></div>
+</div>
+<script>
+function fmtDuree(sec) {
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + "h" + String(m).padStart(2, "0") + "m";
+  if (m > 0) return m + "m";
+  return sec + "s";
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/stats");
+    const data = await res.json();
+    const content = document.getElementById("content");
+    content.innerHTML = "";
+
+    for (const [nom, s] of Object.entries(data)) {
+      const card = document.createElement("div");
+      card.className = "card";
+
+      let html = `<div class="server-title">${nom}</div>`;
+      html += `<div class="server-host">${s.host}</div>`;
+      html += s.online_count > 0
+        ? `<span class="online-badge"><span class="dot"></span>${s.online_count} joueur(s) en ligne</span>`
+        : `<span class="online-badge" style="background:rgba(139,147,161,0.15);color:var(--muted)"><span class="dot" style="background:var(--muted)"></span>Aucun joueur en ligne</span>`;
+
+      if (s.online_players.length > 0) {
+        html += `<div class="players">` + s.online_players.map(p => `<div class="chip">🟢 ${p}</div>`).join("") + `</div>`;
+      }
+
+      const entries = Object.entries(s.temps_total_par_joueur).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      html += `<h2 style="margin-top:24px">Temps de jeu total (top 10)</h2>`;
+      if (entries.length === 0) {
+        html += `<div class="empty">Pas encore de données</div>`;
+      } else {
+        const max = Math.max(...entries.map(e => e[1]));
+        html += entries.map(([player, sec]) => `
+          <div class="bar-row">
+            <div class="bar-label">${player}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${max > 0 ? (sec / max * 100) : 0}%"></div></div>
+            <div class="bar-value">${fmtDuree(sec)}</div>
+          </div>`).join("");
+      }
+
+      const connexions = Object.entries(s.connexions_par_joueur).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      html += `<h2 style="margin-top:24px">Nombre de connexions</h2>`;
+      if (connexions.length === 0) {
+        html += `<div class="empty">Pas encore de données</div>`;
+      } else {
+        html += `<table><tr><th>Joueur</th><th>Connexions</th></tr>` +
+          connexions.map(([p, c]) => `<tr><td>${p}</td><td>${c}</td></tr>`).join("") + `</table>`;
+      }
+
+      card.innerHTML = html;
+      content.appendChild(card);
+    }
+
+    document.getElementById("updated").textContent = "Mis à jour à " + new Date().toLocaleTimeString("fr-FR");
+  } catch (e) {
+    document.getElementById("content").innerHTML = `<div class="card empty">Erreur de chargement des données</div>`;
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+async def handle_index(request):
+    return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+async def handle_api_stats(request):
+    data = {}
+    for nom, cfg in SERVEURS.items():
+        s = states[nom]
+        temps_live = dict(s["temps_total_par_joueur"])
+        for player, start in s["session_start"].items():
+            temps_live[player] = temps_live.get(player, 0) + (time.time() - start)
+        data[nom] = {
+            "host": cfg["host"],
+            "online_players": sorted(s["previously_online"]),
+            "online_count": len(s["previously_online"]),
+            "connexions_par_joueur": dict(s["connexions_par_joueur"]),
+            "temps_total_par_joueur": {k: round(v, 1) for k, v in temps_live.items()},
+        }
+    return web.json_response(data)
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/stats", handle_api_stats)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info("Dashboard web démarré sur le port %s", port)
+
 client = discord.Client(intents=intents)
 
 states = {
@@ -479,6 +635,7 @@ async def on_ready():
         log.exception("Impossible d'enregistrer la vue persistante du panel (non bloquant)")
     for nom in SERVEURS:
         client.loop.create_task(monitor_serveur(nom))
+    client.loop.create_task(start_webserver())
     log.info("Surveillance lancée pour : %s", ", ".join(SERVEURS))
 
 @client.event
