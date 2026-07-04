@@ -29,7 +29,7 @@ os.makedirs(os.path.dirname(SAVE_FILE), exist_ok=True)
 
 SERVEURS = {
     "blaise-pascal": {
-        "host": "blaise-pascal.mine.fun",
+        "host": "blaise-pascal.nitro.games",
         "port": 25565,
         "channels": {
             "alertes": 1499796586014707885,
