@@ -8,6 +8,7 @@ import logging
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import aiohttp
 from aiohttp import web
 from mcstatus import JavaServer
 from collections import defaultdict
@@ -55,116 +56,316 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Player Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --border: #262a33;
-    --text: #e6e8eb; --muted: #8b93a1; --accent: #5865F2; --online: #3ba55d;
+    --bg: #0a0b0f; --panel: #14161d; --panel2: #191c25; --border: #262a36;
+    --text: #eef0f4; --muted: #7d8494; --accent: #7c5cff; --accent2: #22d3ee;
+    --online: #22c55e; --offline: #4b5162;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
+    margin: 0; min-height: 100vh;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(124,92,255,0.18), transparent),
+      radial-gradient(900px 500px at 100% 0%, rgba(34,211,238,0.12), transparent),
+      var(--bg);
+    color: var(--text);
     font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-    padding: 32px 20px;
+    padding: 40px 20px 60px;
   }
-  .wrap { max-width: 920px; margin: 0 auto; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; padding: 20px 24px; margin-bottom: 20px;
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
+  .title { display: flex; align-items: center; gap: 12px; }
+  .title h1 {
+    font-size: 26px; margin: 0; font-weight: 800; letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #fff, #b9a9ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  .card h2 { font-size: 15px; margin: 0 0 16px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-  .server-title { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
-  .server-host { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
-  .online-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(59,165,93,0.15); color: var(--online);
-    padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  .logo { font-size: 30px; filter: drop-shadow(0 0 12px rgba(124,92,255,0.6)); }
+  .live-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--panel2); border: 1px solid var(--border);
+    padding: 7px 14px; border-radius: 999px; font-size: 12px; color: var(--muted);
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--online); }
-  .players { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-  .chip { background: #21252e; border: 1px solid var(--border); padding: 6px 14px; border-radius: 8px; font-size: 14px; }
-  .empty { color: var(--muted); font-style: italic; font-size: 14px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th, td { text-align: left; padding: 8px 10px; font-size: 14px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
-  .bar-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
-  .bar-label { width: 120px; font-size: 13px; flex-shrink: 0; }
-  .bar-track { flex: 1; background: #21252e; border-radius: 6px; height: 18px; overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; }
-  .bar-value { width: 70px; text-align: right; font-size: 12px; color: var(--muted); flex-shrink: 0; }
-  .updated { color: var(--muted); font-size: 12px; text-align: center; margin-top: 20px; }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--online); position: relative; }
+  .pulse::after {
+    content: ""; position: absolute; inset: 0; border-radius: 50%;
+    background: var(--online); animation: pulse 1.6s ease-out infinite;
+  }
+  @keyframes pulse { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(2.8); opacity: 0; } }
+
+  .server-block { margin-bottom: 36px; }
+  .server-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .server-head h2 { font-size: 19px; margin: 0; font-weight: 700; }
+  .server-head .host { color: var(--muted); font-size: 13px; font-family: monospace; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .stat-card {
+    background: linear-gradient(160deg, var(--panel2), var(--panel));
+    border: 1px solid var(--border); border-radius: 16px; padding: 20px;
+    position: relative; overflow: hidden;
+  }
+  .stat-card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; margin-bottom: 8px; }
+  .stat-card .value { font-size: 32px; font-weight: 800; letter-spacing: -0.02em; }
+  .stat-card .value.online { color: var(--online); }
+  .stat-card .glow {
+    position: absolute; width: 140px; height: 140px; border-radius: 50%; filter: blur(50px);
+    background: var(--accent); opacity: .18; top: -50px; right: -50px;
+  }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    padding: 22px 24px; margin-bottom: 16px;
+  }
+  .panel h3 { margin: 0 0 16px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+
+  .players-row { display: flex; flex-wrap: wrap; gap: 10px; }
+  .player-chip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel2); border: 1px solid var(--border);
+    padding: 6px 14px 6px 6px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: transform .15s, border-color .15s;
+  }
+  .player-chip:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .player-chip img { width: 24px; height: 24px; border-radius: 6px; image-rendering: pixelated; }
+  .player-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--online); margin-left: 2px; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(5,6,10,0.7);
+    backdrop-filter: blur(4px); z-index: 50; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-card {
+    background: linear-gradient(160deg, var(--panel2), var(--panel));
+    border: 1px solid var(--border); border-radius: 20px; padding: 28px;
+    max-width: 360px; width: 100%; position: relative; text-align: center;
+  }
+  .modal-close {
+    position: absolute; top: 14px; right: 14px; width: 28px; height: 28px;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--panel2);
+    color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-card .skin-render { width: 130px; image-rendering: pixelated; filter: drop-shadow(0 8px 20px rgba(0,0,0,0.5)); margin: 6px 0 12px; }
+  .modal-card .name { font-size: 20px; font-weight: 800; margin-bottom: 2px; }
+  .modal-card .uuid { color: var(--muted); font-size: 11px; font-family: monospace; margin-bottom: 18px; word-break: break-all; }
+  .modal-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 5px 12px; border-radius: 999px; margin-bottom: 18px; }
+  .modal-status.on { background: rgba(34,197,94,0.15); color: var(--online); }
+  .modal-status.off { background: rgba(75,81,98,0.25); color: var(--muted); }
+  .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+  .modal-stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .modal-stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  .modal-stat .v { font-size: 16px; font-weight: 700; }
+  .modal-loading { color: var(--muted); font-size: 13px; padding: 30px 0; }
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+
+  canvas { max-height: 260px; }
+
+  .updated { color: var(--muted); font-size: 12px; text-align: center; margin-top: 28px; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>🎮 Player Tracker</h1>
-  <div class="sub">Surveillance en temps réel</div>
+  <div class="header">
+    <div class="title">
+      <span class="logo">🎮</span>
+      <h1>Player Tracker</h1>
+    </div>
+    <div class="live-pill"><span class="pulse"></span> Live</div>
+  </div>
   <div id="content"></div>
   <div class="updated" id="updated"></div>
 </div>
+
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this) closeModal()">
+  <div class="modal-card" id="modal-card">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-loading">Chargement...</div>
+  </div>
+</div>
 <script>
+const charts = {};
+
 function fmtDuree(sec) {
   sec = Math.round(sec);
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return h + "h" + String(m).padStart(2, "0") + "m";
+  if (h > 0) return h + "h" + String(m).padStart(2, "0");
   if (m > 0) return m + "m";
   return sec + "s";
+}
+
+function avatarUrl(name) {
+  return `https://mc-heads.net/avatar/${encodeURIComponent(name)}/48`;
+}
+
+function ensureServerDOM(nom) {
+  if (document.getElementById(`server-${nom}`)) return;
+  const block = document.createElement("div");
+  block.className = "server-block";
+  block.id = `server-${nom}`;
+  block.innerHTML = `
+    <div class="server-head">
+      <h2>${nom}</h2>
+      <span class="host"></span>
+    </div>
+    <div class="grid">
+      <div class="stat-card"><div class="glow"></div><div class="label">Joueurs en ligne</div><div class="value online" id="v-online-${nom}">0</div></div>
+      <div class="stat-card"><div class="glow"></div><div class="label">Total connexions</div><div class="value" id="v-connexions-${nom}">0</div></div>
+      <div class="stat-card"><div class="glow"></div><div class="label">Joueur le + actif</div><div class="value" id="v-top-${nom}" style="font-size:20px">-</div></div>
+    </div>
+    <div class="panel">
+      <h3>Joueurs connectés</h3>
+      <div class="players-row" id="players-${nom}"></div>
+    </div>
+    <div class="panel">
+      <h3>Temps de jeu total (top 10)</h3>
+      <canvas id="chart-playtime-${nom}"></canvas>
+    </div>
+    <div class="panel">
+      <h3>Activité par heure de la journée</h3>
+      <canvas id="chart-hourly-${nom}"></canvas>
+    </div>
+  `;
+  document.getElementById("content").appendChild(block);
+}
+
+function chartDefaults() {
+  return {
+    scales: {
+      x: { ticks: { color: "#7d8494", font: { size: 11 } }, grid: { color: "#20232d" } },
+      y: { ticks: { color: "#7d8494", font: { size: 11 } }, grid: { color: "#20232d" }, beginAtZero: true }
+    },
+    plugins: { legend: { display: false } },
+    maintainAspectRatio: false,
+    responsive: true
+  };
+}
+
+function renderPlaytimeChart(nom, data) {
+  const entries = Object.entries(data).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const ctx = document.getElementById(`chart-playtime-${nom}`);
+  const labels = entries.map(e => e[0]);
+  const values = entries.map(e => Math.round(e[1] / 60));
+  const key = `playtime-${nom}`;
+
+  if (charts[key]) {
+    charts[key].data.labels = labels;
+    charts[key].data.datasets[0].data = values;
+    charts[key].update();
+    return;
+  }
+  const gradient = ctx.getContext("2d").createLinearGradient(0, 0, 0, 260);
+  gradient.addColorStop(0, "#7c5cff");
+  gradient.addColorStop(1, "#22d3ee");
+  charts[key] = new Chart(ctx, {
+    type: "bar",
+    data: { labels, datasets: [{ data: values, backgroundColor: gradient, borderRadius: 8, maxBarThickness: 34 }] },
+    options: {
+      ...chartDefaults(),
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => fmtDuree(c.raw * 60) } } },
+      onClick: (evt, elements) => {
+        if (elements.length > 0) openModal(labels[elements[0].index]);
+      },
+      onHover: (evt, elements) => { evt.native.target.style.cursor = elements.length ? "pointer" : "default"; }
+    }
+  });
+}
+
+function renderHourlyChart(nom, data) {
+  const labels = Object.keys(data).sort((a, b) => a - b).map(h => h + "h");
+  const values = Object.keys(data).sort((a, b) => a - b).map(h => data[h]);
+  const key = `hourly-${nom}`;
+  const ctx = document.getElementById(`chart-hourly-${nom}`);
+
+  if (charts[key]) {
+    charts[key].data.datasets[0].data = values;
+    charts[key].update();
+    return;
+  }
+  const gradient = ctx.getContext("2d").createLinearGradient(0, 0, 0, 260);
+  gradient.addColorStop(0, "rgba(124,92,255,0.5)");
+  gradient.addColorStop(1, "rgba(124,92,255,0.02)");
+  charts[key] = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets: [{ data: values, borderColor: "#7c5cff", backgroundColor: gradient, fill: true, tension: 0.35, pointRadius: 0, borderWidth: 2 }] },
+    options: chartDefaults()
+  });
 }
 
 async function refresh() {
   try {
     const res = await fetch("/api/stats");
     const data = await res.json();
-    const content = document.getElementById("content");
-    content.innerHTML = "";
 
     for (const [nom, s] of Object.entries(data)) {
-      const card = document.createElement("div");
-      card.className = "card";
+      ensureServerDOM(nom);
+      document.querySelector(`#server-${nom} .host`).textContent = s.host;
 
-      let html = `<div class="server-title">${nom}</div>`;
-      html += `<div class="server-host">${s.host}</div>`;
-      html += s.online_count > 0
-        ? `<span class="online-badge"><span class="dot"></span>${s.online_count} joueur(s) en ligne</span>`
-        : `<span class="online-badge" style="background:rgba(139,147,161,0.15);color:var(--muted)"><span class="dot" style="background:var(--muted)"></span>Aucun joueur en ligne</span>`;
+      document.getElementById(`v-online-${nom}`).textContent = s.online_count;
 
-      if (s.online_players.length > 0) {
-        html += `<div class="players">` + s.online_players.map(p => `<div class="chip">🟢 ${p}</div>`).join("") + `</div>`;
-      }
+      const totalConnexions = Object.values(s.connexions_par_joueur).reduce((a, b) => a + b, 0);
+      document.getElementById(`v-connexions-${nom}`).textContent = totalConnexions;
 
-      const entries = Object.entries(s.temps_total_par_joueur).sort((a, b) => b[1] - a[1]).slice(0, 10);
-      html += `<h2 style="margin-top:24px">Temps de jeu total (top 10)</h2>`;
-      if (entries.length === 0) {
-        html += `<div class="empty">Pas encore de données</div>`;
-      } else {
-        const max = Math.max(...entries.map(e => e[1]));
-        html += entries.map(([player, sec]) => `
-          <div class="bar-row">
-            <div class="bar-label">${player}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${max > 0 ? (sec / max * 100) : 0}%"></div></div>
-            <div class="bar-value">${fmtDuree(sec)}</div>
-          </div>`).join("");
-      }
+      const top = Object.entries(s.temps_total_par_joueur).sort((a, b) => b[1] - a[1])[0];
+      document.getElementById(`v-top-${nom}`).textContent = top ? top[0] : "-";
 
-      const connexions = Object.entries(s.connexions_par_joueur).sort((a, b) => b[1] - a[1]).slice(0, 10);
-      html += `<h2 style="margin-top:24px">Nombre de connexions</h2>`;
-      if (connexions.length === 0) {
-        html += `<div class="empty">Pas encore de données</div>`;
-      } else {
-        html += `<table><tr><th>Joueur</th><th>Connexions</th></tr>` +
-          connexions.map(([p, c]) => `<tr><td>${p}</td><td>${c}</td></tr>`).join("") + `</table>`;
-      }
+      const playersDiv = document.getElementById(`players-${nom}`);
+      playersDiv.innerHTML = s.online_players.length > 0
+        ? s.online_players.map(p => `<div class="player-chip" onclick="openModal('${p.replace(/'/g, "\\'")}')"><img src="${avatarUrl(p)}" onerror="this.style.display='none'"><span>${p}</span><span class="dot"></span></div>`).join("")
+        : `<div class="empty">Personne en ligne pour le moment</div>`;
 
-      card.innerHTML = html;
-      content.appendChild(card);
+      renderPlaytimeChart(nom, s.temps_total_par_joueur);
+      renderHourlyChart(nom, s.connexions_par_heure);
     }
 
     document.getElementById("updated").textContent = "Mis à jour à " + new Date().toLocaleTimeString("fr-FR");
   } catch (e) {
-    document.getElementById("content").innerHTML = `<div class="card empty">Erreur de chargement des données</div>`;
+    document.getElementById("content").innerHTML = `<div class="panel empty">Erreur de chargement des données</div>`;
   }
+}
+
+function fmtDate(ts) {
+  if (!ts) return "Inconnu";
+  return new Date(ts * 1000).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+}
+
+async function openModal(name) {
+  const overlay = document.getElementById("modal-overlay");
+  const card = document.getElementById("modal-card");
+  card.innerHTML = `<button class="modal-close" onclick="closeModal()">✕</button><div class="modal-loading">Chargement...</div>`;
+  overlay.classList.add("open");
+
+  try {
+    const res = await fetch(`/api/player/${encodeURIComponent(name)}`);
+    const data = await res.json();
+    const st = data.stats;
+
+    card.innerHTML = `
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <img class="skin-render" src="https://mc-heads.net/body/${encodeURIComponent(name)}/right" onerror="this.src='https://mc-heads.net/body/MHF_Steve/right'">
+      <div class="name">${name}</div>
+      <div class="uuid">${data.uuid || "UUID introuvable"}</div>
+      ${st
+        ? `<div class="modal-status ${st.en_ligne ? 'on' : 'off'}">${st.en_ligne ? '🟢 En ligne maintenant' : '⚫ Hors ligne'}</div>
+           <div class="modal-grid">
+             <div class="modal-stat"><div class="k">Temps de jeu total</div><div class="v">${fmtDuree(st.temps_total)}</div></div>
+             <div class="modal-stat"><div class="k">Connexions</div><div class="v">${st.connexions}</div></div>
+             <div class="modal-stat" style="grid-column:span 2"><div class="k">Vu pour la première fois</div><div class="v">${fmtDate(st.premiere_fois_vu)}</div></div>
+           </div>`
+        : `<div class="empty">Pas encore de données suivies pour ce joueur</div>`
+      }
+    `;
+  } catch (e) {
+    card.innerHTML = `<button class="modal-close" onclick="closeModal()">✕</button><div class="empty">Erreur de chargement</div>`;
+  }
+}
+
+function closeModal() {
+  document.getElementById("modal-overlay").classList.remove("open");
 }
 
 refresh();
@@ -190,13 +391,61 @@ async def handle_api_stats(request):
             "online_count": len(s["previously_online"]),
             "connexions_par_joueur": dict(s["connexions_par_joueur"]),
             "temps_total_par_joueur": {k: round(v, 1) for k, v in temps_live.items()},
+            "connexions_par_heure": {str(h): s["connexions_par_heure"].get(h, 0) for h in range(24)},
         }
     return web.json_response(data)
+
+async def handle_api_player(request):
+    name = request.match_info["name"]
+
+    # Cherche les stats internes du bot pour ce joueur, sur tous les serveurs surveillés
+    joueur_stats = None
+    for nom, s in states.items():
+        # comparaison insensible à la casse (les pseudos Minecraft ne sont pas case-sensitive à l'affichage)
+        match = next((p for p in s["temps_total_par_joueur"] if p.lower() == name.lower()), None) \
+            or next((p for p in s["connexions_par_joueur"] if p.lower() == name.lower()), None) \
+            or next((p for p in s["previously_online"] if p.lower() == name.lower()), None)
+        if match:
+            temps = s["temps_total_par_joueur"].get(match, 0)
+            if match in s["session_start"]:
+                temps += time.time() - s["session_start"][match]
+            joueur_stats = {
+                "serveur": nom,
+                "en_ligne": match in s["previously_online"],
+                "temps_total": round(temps, 1),
+                "connexions": s["connexions_par_joueur"].get(match, 0),
+                "premiere_fois_vu": s["first_seen"].get(match),
+            }
+            break
+
+    # UUID + infos de compte via PlayerDB (API publique tierce, pas de scraping,
+    # remplace juste api.mojang.com qui a des règles de cache plus strictes)
+    uuid = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://playerdb.co/api/player/minecraft/{name}",
+                headers={"User-Agent": "player-tracker-discord-bot"},
+                timeout=aiohttp.ClientTimeout(total=4),
+            ) as resp:
+                if resp.status == 200:
+                    payload = await resp.json()
+                    if payload.get("code") == "player.found":
+                        uuid = payload["data"]["player"]["id"]
+    except Exception as e:
+        log.warning("Lookup PlayerDB échoué pour %s -> %s", name, e)
+
+    return web.json_response({
+        "name": name,
+        "uuid": uuid,
+        "stats": joueur_stats,
+    })
 
 async def start_webserver():
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/stats", handle_api_stats)
+    app.router.add_get("/api/player/{name}", handle_api_player)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
@@ -210,6 +459,7 @@ states = {
     nom: {
         "previously_online": set(),
         "session_start": {},
+        "first_seen": {},
         "players_this_hour": set(),
         "connexions_par_joueur": defaultdict(int),
         "connexions_par_heure": defaultdict(int),
@@ -231,6 +481,7 @@ def sauvegarder():
                     "connexions_par_joueur": dict(s["connexions_par_joueur"]),
                     "connexions_par_heure": {str(k): v for k, v in s["connexions_par_heure"].items()},
                     "temps_total_par_joueur": dict(s["temps_total_par_joueur"]),
+                    "first_seen": dict(s["first_seen"]),
                 }
                 for nom, s in states.items()
             }
@@ -261,6 +512,8 @@ def charger():
                     states[nom]["connexions_par_heure"][int(k)] = v
                 for k, v in s.get("temps_total_par_joueur", {}).items():
                     states[nom]["temps_total_par_joueur"][k] = v
+                for k, v in s.get("first_seen", {}).items():
+                    states[nom]["first_seen"][k] = v
         log.info("Données chargées depuis %s", SAVE_FILE)
     except Exception:
         log.exception("Échec du chargement des données, on repart de zéro")
@@ -573,6 +826,8 @@ async def monitor_serveur(nom_serveur):
                 s["connexions_par_joueur"][player] += 1
                 s["connexions_par_heure"][heure_actuelle] += 1
                 s["session_start"][player] = time.time()
+                if player not in s["first_seen"]:
+                    s["first_seen"][player] = time.time()
                 for key, entries in trackers.items():
                     if player.lower() == key:
                         for (user_id, serveur_tracker) in entries:
